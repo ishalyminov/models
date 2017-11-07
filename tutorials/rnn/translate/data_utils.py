@@ -117,7 +117,8 @@ def create_vocabulary(vocabulary_path,
                       max_vocabulary_size,
                       tokenizer=None,
                       normalize_digits=True,
-                      copy_tokens=[]):
+                      copy_tokens=[],
+                      force=False):
   """Create vocabulary file (if it does not exist yet) from data file.
 
   Data file is assumed to contain one sentence per line. Each sentence is
@@ -134,7 +135,7 @@ def create_vocabulary(vocabulary_path,
       if None, basic_tokenizer will be used.
     normalize_digits: Boolean; if true, all digits are replaced by 0s.
   """
-  if not gfile.Exists(vocabulary_path):
+  if not gfile.Exists(vocabulary_path) or force:
     print("Creating vocabulary %s from data %s" % (vocabulary_path, data_path))
     vocab = {}
     with gfile.GFile(data_path, mode="rb") as f:
@@ -220,8 +221,8 @@ def sentence_to_token_ids(sentence,
   return [vocabulary.get(_DIGIT_RE.sub(b"0", w), UNK_ID) for w in words]
 
 
-def sentence_to_copy_ids(target_sentence,
-                         source_sentence,
+def sentence_to_copy_ids(source_sentence,
+                         target_sentence,
                          vocabulary,
                          tokenizer=None,
                          normalize_digits=True):
@@ -248,24 +249,24 @@ def sentence_to_copy_ids(target_sentence,
   else:
     words_source = basic_tokenizer(source_sentence)
     words_target = basic_tokenizer(target_sentence)
-  source_word_map = defaultdict(lambda: [])
-  for index, word in enumerate(words_source):
-      source_word_map[word].append(index)
   if normalize_digits:
     # Normalize digits by 0 before looking words up in the vocabulary
     words_source = [_DIGIT_RE.sub(b"0", w) for w in words_source]
     words_target = [_DIGIT_RE.sub(b"0", w) for w in words_target]
+  source_word_map = defaultdict(lambda: [])
+  for index, word in enumerate(words_source):
+    source_word_map[word].append(index)
   result = []
   for w in words_target:
-    partial_result = []
+    copy_index_ids = []
     if w in source_word_map:
-      for index in source_word_map[w]:
-        copy_token = '${}'.format(index)
-        if copy_token in vocabulary:
-          partial_result.append(vocabulary[copy_token])
-    if not len(partial_result):
-      partial_result.append(vocabulary.get(w, UNK_ID))
-
+      copy_indices = ['${}'.format(index) for index in source_word_map[w]]
+      copy_index_ids = filter(lambda x: x,
+                              [vocabulary.get(copy_index, None) for copy_index in copy_indices])
+    # trying to find the token in vocabulary for generating
+    if not len(copy_index_ids):
+      copy_index_ids.append(vocabulary.get(w, UNK_ID))
+    result.append(copy_index_ids)
   return result
 
 
@@ -273,7 +274,8 @@ def data_to_token_ids(data_path,
                       target_path,
                       vocabulary_path,
                       tokenizer=None,
-                      normalize_digits=True):
+                      normalize_digits=True,
+                      force=False):
   """Tokenize data file and turn into token-ids using given vocabulary file.
 
   This function loads data line-by-line from data_path, calls the above
@@ -288,7 +290,7 @@ def data_to_token_ids(data_path,
       if None, basic_tokenizer will be used.
     normalize_digits: Boolean; if true, all digits are replaced by 0s.
   """
-  if not gfile.Exists(target_path):
+  if not gfile.Exists(target_path) or force:
     print("Tokenizing data in %s" % data_path)
     vocab, _ = initialize_vocabulary(vocabulary_path)
     with gfile.GFile(data_path, mode="rb") as data_file:
@@ -298,8 +300,10 @@ def data_to_token_ids(data_path,
           counter += 1
           if counter % 100000 == 0:
             print("  tokenizing line %d" % counter)
-          token_ids = sentence_to_token_ids(tf.compat.as_bytes(line), vocab,
-                                            tokenizer, normalize_digits)
+          token_ids = sentence_to_token_ids(tf.compat.as_bytes(line),
+                                            vocab,
+                                            tokenizer,
+                                            normalize_digits)
           tokens_file.write(" ".join([str(tok) for tok in token_ids]) + "\n")
 
 
@@ -308,7 +312,8 @@ def data_to_copy_ids(source_data_path,
                      target_path,
                      vocabulary_path,
                      tokenizer=None,
-                     normalize_digits=True):
+                     normalize_digits=True,
+                     force=False):
   """Tokenize data file and turn into token-ids using given vocabulary file.
 
   This function loads data line-by-line from data_path, calls the above
@@ -323,24 +328,24 @@ def data_to_copy_ids(source_data_path,
       if None, basic_tokenizer will be used.
     normalize_digits: Boolean; if true, all digits are replaced by 0s.
   """
-  if not gfile.Exists(target_path):
+  if not gfile.Exists(target_path) or force:
     print("Tokenizing data in (%s, %s)" % (source_data_path, target_data_path))
     vocab, _ = initialize_vocabulary(vocabulary_path)
     with gfile.GFile(source_data_path, mode="rb") as source_data_file:
-        with gfile.GFile(target_data_path, mode="rb") as target_data_file:
-          with gfile.GFile(target_path, mode="w") as tokens_file:
-            counter = 0
-            for source_line, target_line in zip(source_data_file, target_data_file):
-              counter += 1
-              if counter % 100000 == 0:
-                print("  tokenizing line %d" % counter)
-              token_ids = sentence_to_copy_ids(tf.compat.as_bytes(source_line),
-                                               tf.compat.as_bytes(target_line),
-                                               vocab,
-                                               tokenizer,
-                                               normalize_digits)
-              tokens_file.write(" ".join([';'.join(tokens)
-                                          for tokens in token_ids]) + "\n")
+      with gfile.GFile(target_data_path, mode="rb") as target_data_file:
+        with gfile.GFile(target_path, mode="w") as tokens_file:
+          counter = 0
+          for source_line, target_line in zip(source_data_file, target_data_file):
+            counter += 1
+            if counter % 1000 == 0:
+              print("  tokenizing line %d" % counter)
+            token_ids = sentence_to_copy_ids(tf.compat.as_bytes(source_line),
+                                             tf.compat.as_bytes(target_line),
+                                             vocab,
+                                             tokenizer,
+                                             normalize_digits)
+            tokens_file.write(" ".join([';'.join(map(str, tokens))
+                                        for tokens in token_ids]) + "\n")
 
 
 def prepare_wmt_data(data_dir, en_vocabulary_size, fr_vocabulary_size, tokenizer=None):
@@ -370,15 +375,19 @@ def prepare_wmt_data(data_dir, en_vocabulary_size, fr_vocabulary_size, tokenizer
   to_train_path = train_path + ".fr"
   from_dev_path = dev_path + ".en"
   to_dev_path = dev_path + ".fr"
-  return prepare_data(data_dir, from_train_path, to_train_path, from_dev_path, to_dev_path, en_vocabulary_size,
-                      fr_vocabulary_size, tokenizer)
+  return prepare_data(data_dir,
+                      from_train_path,
+                      to_train_path,
+                      from_dev_path,
+                      to_dev_path,
+                      en_vocabulary_size,
+                      fr_vocabulary_size,
+                      tokenizer)
 
 
 def create_copy_vocabulary(in_copy_vocabulary_size):
-    return [
-        '${}'.format(index)
-        for index in xrange(in_copy_vocabulary_size)
-    ]
+    return ['${}'.format(index)
+            for index in xrange(in_copy_vocabulary_size)]
 
 
 def prepare_data(data_dir,
@@ -389,7 +398,8 @@ def prepare_data(data_dir,
                  from_vocabulary_size,
                  to_vocabulary_size,
                  tokenizer=None,
-                 copy_tokens_number=0):
+                 copy_tokens_number=0,
+                 force=False):
   """Preapre all necessary files that are required for the training.
 
     Args:
@@ -423,11 +433,13 @@ def prepare_data(data_dir,
                     to_train_path ,
                     to_vocabulary_size,
                     tokenizer,
-                    copy_tokens=copy_vocabulary)
+                    copy_tokens=copy_vocabulary,
+                    force=force)
   create_vocabulary(from_vocab_path,
                     from_train_path ,
                     from_vocabulary_size,
-                    tokenizer)
+                    tokenizer,
+                    force=force)
 
   # Create token ids for the training data.
   to_train_ids_path = to_train_path + (".ids%d" % to_vocabulary_size)
@@ -436,11 +448,13 @@ def prepare_data(data_dir,
                    to_train_path,
                    to_train_ids_path,
                    to_vocab_path,
-                   tokenizer)
+                   tokenizer,
+                   force=force)
   data_to_token_ids(from_train_path,
                     from_train_ids_path,
                     from_vocab_path,
-                    tokenizer)
+                    tokenizer,
+                    force=force)
 
   # Create token ids for the development data.
   to_dev_ids_path = to_dev_path + (".ids%d" % to_vocabulary_size)
@@ -449,12 +463,17 @@ def prepare_data(data_dir,
                    to_dev_path,
                    to_dev_ids_path,
                    to_vocab_path,
-                   tokenizer)
-  data_to_token_ids(from_dev_path, from_dev_ids_path, from_vocab_path, tokenizer)
-
+                   tokenizer,
+                   force=force)
+  data_to_token_ids(from_dev_path,
+                    from_dev_ids_path,
+                    from_vocab_path,
+                    tokenizer,
+                    force=force)
   return (from_train_ids_path,
           to_train_ids_path,
           from_dev_ids_path,
           to_dev_ids_path,
           from_vocab_path,
           to_vocab_path)
+

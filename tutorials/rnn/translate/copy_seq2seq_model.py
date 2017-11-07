@@ -290,6 +290,11 @@ class CopySeq2SeqModel(Seq2SeqModel):
       decoder_pad_size = decoder_size - len(decoder_input) - 1
       decoder_inputs.append([data_utils.GO_ID] + decoder_input +
                             [data_utils.PAD_ID] * decoder_pad_size)
+      decoder_inputs_1hot = np.zeros(shape=(len(decoder_inputs), self.target_vocab_size),
+                                     dtype=np.int16)
+      for input_index, decoder_input in enumerate(decoder_inputs):
+          for element in decoder_input:
+              decoder_inputs_1hot[input_index][element] = 1
 
     # Now we create batch-major vectors from the data selected above.
     batch_encoder_inputs, batch_decoder_inputs, batch_weights = [], [], []
@@ -303,7 +308,7 @@ class CopySeq2SeqModel(Seq2SeqModel):
     # Batch decoder inputs are re-indexed decoder_inputs, we create weights.
     for length_idx in xrange(decoder_size):
       batch_decoder_inputs.append(
-          np.array([decoder_inputs[batch_idx][length_idx]
+          np.array([decoder_inputs_1hot[batch_idx][length_idx]
                     for batch_idx in xrange(self.batch_size)], dtype=np.int32))
 
       # Create target_weights to be 0 for targets that are padding.
@@ -313,7 +318,7 @@ class CopySeq2SeqModel(Seq2SeqModel):
         # The corresponding target is decoder_input shifted by 1 forward.
         if length_idx < decoder_size - 1:
           target = decoder_inputs[batch_idx][length_idx + 1]
-        if length_idx == decoder_size - 1 or target == data_utils.PAD_ID:
+        if length_idx == decoder_size - 1 or target == [data_utils.PAD_ID]:
           batch_weight[batch_idx] = 0.0
       batch_weights.append(batch_weight)
     return batch_encoder_inputs, batch_decoder_inputs, batch_weights
