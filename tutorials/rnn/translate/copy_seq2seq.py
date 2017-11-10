@@ -1,18 +1,16 @@
 import copy
 
+import tensorflow as tf
 import tensorflow.contrib.legacy_seq2seq
-from tensorflow.python.ops import variable_scope
 from tensorflow.contrib.rnn.python.ops import core_rnn_cell
-from tensorflow.python.ops import rnn, array_ops
 from tensorflow.python.framework import ops
-from tensorflow.python.ops import (
-  variable_scope,
-  rnn, array_ops,
-  embedding_ops,
-  nn_ops,
-  rnn_cell_impl,
-  math_ops
-)
+from tensorflow.python.ops import (variable_scope,
+                                   rnn,
+                                   array_ops,
+                                   embedding_ops,
+                                   nn_ops,
+                                   rnn_cell_impl,
+                                   math_ops)
 from tensorflow.python.util import nest
 
 Linear = rnn_cell_impl._Linear
@@ -74,22 +72,22 @@ def copy_seq2seq(encoder_inputs,
       state: The state of each decoder cell at the final time-step.
         It is a 2D Tensor of shape [batch_size x cell.state_size].
   """
-  with variable_scope.variable_scope(
-      scope or "copy_seq2seq", dtype=dtype) as scope:
+  with variable_scope.variable_scope(scope or "copy_seq2seq",
+                                     dtype=dtype) as scope:
     dtype = scope.dtype
     # Encoder.
     encoder_cell = copy.deepcopy(cell)
-    encoder_cell = core_rnn_cell.EmbeddingWrapper(
-        encoder_cell,
-        embedding_classes=num_encoder_symbols,
-        embedding_size=embedding_size)
-    encoder_outputs, encoder_state = rnn.static_rnn(
-        encoder_cell, encoder_inputs, dtype=dtype)
+    encoder_cell = \
+        core_rnn_cell.EmbeddingWrapper(encoder_cell,
+                                       embedding_classes=num_encoder_symbols,
+                                       embedding_size=embedding_size)
+    encoder_outputs, encoder_state = rnn.static_rnn(encoder_cell,
+                                                    encoder_inputs,
+                                                    dtype=dtype)
 
     # First calculate a concatenation of encoder outputs to put attention on.
-    top_states = [
-        array_ops.reshape(e, [-1, 1, cell.output_size]) for e in encoder_outputs
-    ]
+    top_states = [array_ops.reshape(e, [-1, 1, cell.output_size])
+                  for e in encoder_outputs]
     attention_states = array_ops.concat(top_states, 1)
 
     # Decoder.
@@ -100,6 +98,24 @@ def copy_seq2seq(encoder_inputs,
 
     if isinstance(feed_previous, bool):
       return embedding_attention_copy_decoder(
+        decoder_inputs,
+        encoder_state,
+        attention_states,
+        cell,
+        num_decoder_symbols,
+        embedding_size,
+        num_heads=num_heads,
+        output_size=output_size,
+        output_projection=output_projection,
+        feed_previous=feed_previous,
+        initial_state_attention=initial_state_attention)
+
+    # If feed_previous is a Tensor, we construct 2 graphs and use cond.
+    def decoder(feed_previous_bool):
+      reuse = None if feed_previous_bool else True
+      with variable_scope.variable_scope(
+          variable_scope.get_variable_scope(), reuse=reuse):
+        outputs, state = embedding_attention_copy_decoder(
           decoder_inputs,
           encoder_state,
           attention_states,
@@ -109,27 +125,9 @@ def copy_seq2seq(encoder_inputs,
           num_heads=num_heads,
           output_size=output_size,
           output_projection=output_projection,
-          feed_previous=feed_previous,
+          feed_previous=feed_previous_bool,
+          update_embedding_for_previous=False,
           initial_state_attention=initial_state_attention)
-
-    # If feed_previous is a Tensor, we construct 2 graphs and use cond.
-    def decoder(feed_previous_bool):
-      reuse = None if feed_previous_bool else True
-      with variable_scope.variable_scope(
-          variable_scope.get_variable_scope(), reuse=reuse):
-        outputs, state = embedding_attention_copy_decoder(
-            decoder_inputs,
-            encoder_state,
-            attention_states,
-            cell,
-            num_decoder_symbols,
-            embedding_size,
-            num_heads=num_heads,
-            output_size=output_size,
-            output_projection=output_projection,
-            feed_previous=feed_previous_bool,
-            update_embedding_for_previous=False,
-            initial_state_attention=initial_state_attention)
         state_list = [state]
         if nest.is_sequence(state):
           state_list = nest.flatten(state)
@@ -142,8 +140,8 @@ def copy_seq2seq(encoder_inputs,
     state_list = outputs_and_state[outputs_len:]
     state = state_list[0]
     if nest.is_sequence(encoder_state):
-      state = nest.pack_sequence_as(
-          structure=encoder_state, flat_sequence=state_list)
+      state = nest.pack_sequence_as(structure=encoder_state,
+                                    flat_sequence=state_list)
     return outputs_and_state[:outputs_len], state
 
 
@@ -216,21 +214,22 @@ def embedding_attention_copy_decoder(decoder_inputs,
 
     embedding = variable_scope.get_variable("embedding",
                                             [num_symbols, embedding_size])
-    loop_function = _extract_argmax_and_embed(
-        embedding, output_projection,
-        update_embedding_for_previous) if feed_previous else None
-    emb_inp = [
-        embedding_ops.embedding_lookup(embedding, i) for i in decoder_inputs
-    ]
-    return copy_decoder(
-        emb_inp,
-        initial_state,
-        attention_states,
-        cell,
-        output_size=output_size,
-        num_heads=num_heads,
-        loop_function=loop_function,
-        initial_state_attention=initial_state_attention)
+    loop_function = \
+        _extract_argmax_and_embed(embedding,
+                                  output_projection,
+                                  update_embedding_for_previous) \
+        if feed_previous else None
+    emb_inp = [embedding_ops.embedding_lookup(embedding, i)
+               for i in decoder_inputs]
+    return copy_decoder(emb_inp,
+                        initial_state,
+                        attention_states,
+                        cell,
+                        output_size=output_size,
+                        num_heads=num_heads,
+                        loop_function=loop_function,
+                        initial_state_attention=initial_state_attention)
+
 
 def copy_decoder(decoder_inputs,
                  initial_state,
@@ -286,8 +285,8 @@ def copy_decoder(decoder_inputs,
       k = variable_scope.get_variable("AttnW_%d" % a,
                                       [1, 1, attn_size, attention_vec_size])
       hidden_features.append(nn_ops.conv2d(hidden, k, [1, 1, 1, 1], "SAME"))
-      v.append(
-          variable_scope.get_variable("AttnV_%d" % a, [attention_vec_size]))
+      v.append(variable_scope.get_variable("AttnV_%d" % a,
+                                           [attention_vec_size]))
 
     state = initial_state
 
@@ -312,18 +311,16 @@ def copy_decoder(decoder_inputs,
           a = nn_ops.softmax(s)
           attention_weights.append(a)
           # Now calculate the attention-weighted vector d.
-          d = math_ops.reduce_sum(
-              array_ops.reshape(a, [-1, attn_length, 1, 1]) * hidden, [1, 2])
+          d = math_ops.reduce_sum(array_ops.reshape(a, [-1, attn_length, 1, 1]) * hidden,
+                                  [1, 2])
           ds.append(array_ops.reshape(d, [-1, attn_size]))
       return ds, attention_weights
 
     outputs = []
     prev = None
     batch_attn_size = array_ops.stack([batch_size, attn_size])
-    attns = [
-        array_ops.zeros(
-            batch_attn_size, dtype=dtype) for _ in xrange(num_heads)
-    ]
+    attns = [array_ops.zeros(batch_attn_size, dtype=dtype)
+             for _ in xrange(num_heads)]
     for a in attns:  # Ensure the second shape of attention vectors is set.
       a.set_shape([None, attn_size])
     if initial_state_attention:
@@ -346,8 +343,8 @@ def copy_decoder(decoder_inputs,
       cell_output, state = cell(x, state)
       # Run the attention mechanism.
       if i == 0 and initial_state_attention:
-        with variable_scope.variable_scope(
-            variable_scope.get_variable_scope(), reuse=True):
+        with variable_scope.variable_scope(variable_scope.get_variable_scope(),
+                                           reuse=True):
           attns, attn_weights = attention(state)
       else:
         attns, attn_weights = attention(state)
@@ -361,3 +358,59 @@ def copy_decoder(decoder_inputs,
       outputs.append(output)
 
   return outputs, state
+
+
+def copy_loss(_sentinel=None, labels=None, logits=None, dim=-1, name=None):
+  """Computes softmax cross entropy between `logits` and `labels`.
+
+  Measures the probability error in discrete classification tasks in which the
+  classes are mutually exclusive (each entry is in exactly one class).  For
+  example, each CIFAR-10 image is labeled with one and only one label: an image
+  can be a dog or a truck, but not both.
+
+  **NOTE:**  While the classes are mutually exclusive, their probabilities
+  need not be.  All that is required is that each row of `labels` is
+  a valid probability distribution.  If they are not, the computation of the
+  gradient will be incorrect.
+
+  If using exclusive `labels` (wherein one and only
+  one class is true at a time), see `sparse_softmax_cross_entropy_with_logits`.
+
+  **WARNING:** This op expects unscaled logits, since it performs a `softmax`
+  on `logits` internally for efficiency.  Do not call this op with the
+  output of `softmax`, as it will produce incorrect results.
+
+  `logits` and `labels` must have the same shape, e.g.
+  `[batch_size, num_classes]` and the same dtype (either `float16`, `float32`,
+  or `float64`).
+
+  Backpropagation will happen into both `logits` and `labels`.  To disallow
+  backpropagation into `labels`, pass label tensors through a `stop_gradients`
+  before feeding it to this function.
+
+  **Note that to avoid confusion, it is required to pass only named arguments to
+  this function.**
+
+  Args:
+    _sentinel: Used to prevent positional parameters. Internal, do not use.
+    labels: Each row `labels[i]` must be a valid probability distribution.
+    logits: Unscaled log probabilities.
+    dim: The class dimension. Defaulted to -1 which is the last dimension.
+    name: A name for the operation (optional).
+
+  Returns:
+    A 1-D `Tensor` of length `batch_size` of the same type as `logits` with the
+    softmax cross entropy loss.
+  """
+  _ensure_xent_args("softmax_cross_entropy_with_logits", _sentinel,
+                    labels, logits)
+
+  for logit, label in zip(logits, labels):
+      combined_copy_logit = tf.tensordot(logit, label)
+      for i in xrange(len(logit)):
+          tf.assign(logit[i], tf.cond(label[i] == 1, combined_copy_logit, logit[i]))
+  return nn_pos.softmax_cross_entropy_with_logits(_sentinel=_sentinel,
+                                                  labels=labels,
+                                                  logits=logits,
+                                                  dim=dim,
+                                                  name=name)
