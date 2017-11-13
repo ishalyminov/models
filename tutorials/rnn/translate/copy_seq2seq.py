@@ -413,3 +413,4 @@ def copy_loss(_sentinel=None, labels=None, logits=None, dim=-1, name=None):
                                                   logits=logits,
                                                   dim=dim,
                                                   name=name)
+
