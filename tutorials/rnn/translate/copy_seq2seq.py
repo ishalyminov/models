@@ -360,57 +360,175 @@ def copy_decoder(decoder_inputs,
   return outputs, state
 
 
-def copy_loss(_sentinel=None, labels=None, logits=None, dim=-1, name=None):
-  """Computes softmax cross entropy between `logits` and `labels`.
-
-  Measures the probability error in discrete classification tasks in which the
-  classes are mutually exclusive (each entry is in exactly one class).  For
-  example, each CIFAR-10 image is labeled with one and only one label: an image
-  can be a dog or a truck, but not both.
-
-  **NOTE:**  While the classes are mutually exclusive, their probabilities
-  need not be.  All that is required is that each row of `labels` is
-  a valid probability distribution.  If they are not, the computation of the
-  gradient will be incorrect.
-
-  If using exclusive `labels` (wherein one and only
-  one class is true at a time), see `sparse_softmax_cross_entropy_with_logits`.
-
-  **WARNING:** This op expects unscaled logits, since it performs a `softmax`
-  on `logits` internally for efficiency.  Do not call this op with the
-  output of `softmax`, as it will produce incorrect results.
-
-  `logits` and `labels` must have the same shape, e.g.
-  `[batch_size, num_classes]` and the same dtype (either `float16`, `float32`,
-  or `float64`).
-
-  Backpropagation will happen into both `logits` and `labels`.  To disallow
-  backpropagation into `labels`, pass label tensors through a `stop_gradients`
-  before feeding it to this function.
-
-  **Note that to avoid confusion, it is required to pass only named arguments to
-  this function.**
+def sequence_loss_by_example(logits,
+                             targets,
+                             weights,
+                             average_across_timesteps=True,
+                             softmax_loss_function=None,
+                             name=None):
+  """Weighted cross-entropy loss for a sequence of logits (per example).
 
   Args:
-    _sentinel: Used to prevent positional parameters. Internal, do not use.
-    labels: Each row `labels[i]` must be a valid probability distribution.
-    logits: Unscaled log probabilities.
-    dim: The class dimension. Defaulted to -1 which is the last dimension.
-    name: A name for the operation (optional).
+    logits: List of 2D Tensors of shape [batch_size x num_decoder_symbols].
+    targets: List of 1D batch-sized int32 Tensors of the same length as logits.
+    weights: List of 1D batch-sized float-Tensors of the same length as logits.
+    average_across_timesteps: If set, divide the returned cost by the total
+      label weight.
+    softmax_loss_function: Function (labels, logits) -> loss-batch
+      to be used instead of the standard softmax (the default if this is None).
+      **Note that to avoid confusion, it is required for the function to accept
+      named arguments.**
+    name: Optional name for this operation, default: "sequence_loss_by_example".
 
   Returns:
-    A 1-D `Tensor` of length `batch_size` of the same type as `logits` with the
-    softmax cross entropy loss.
-  """
-  nn_ops._ensure_xent_args("copy_loss", _sentinel, labels, logits)
+    1D batch-sized float Tensor: The log-perplexity for each sequence.
 
-  for logit, label in zip(logits, labels):
-    combined_copy_logit = tf.tensordot(logit, label)
+  Raises:
+    ValueError: If len(logits) is different from len(targets) or len(weights).
+  """
+  if len(targets) != len(logits) or len(weights) != len(logits):
+    raise ValueError("Lengths of logits, weights, and targets must be the same "
+                     "%d, %d, %d." % (len(logits), len(weights), len(targets)))
+  with ops.name_scope(name, "sequence_loss_by_example",
+                      logits + targets + weights):
+    log_perp_list = []
+    for logit, target, weight in zip(logits, targets, weights):
+      if softmax_loss_function is None:
+        # TODO(irving,ebrevdo): This reshape is needed because
+        # sequence_loss_by_example is called with scalars sometimes, which
+        # violates our general scalar strictness policy.
+        target = array_ops.reshape(target, [-1])
+        crossent = nn_ops.sparse_softmax_cross_entropy_with_logits(
+            labels=target, logits=logit)
+      else:
+        crossent = softmax_loss_function(labels=target, logits=logit)
+      log_perp_list.append(crossent * weight)
+    log_perps = math_ops.add_n(log_perp_list)
+    if average_across_timesteps:
+      total_size = math_ops.add_n(weights)
+      total_size += 1e-12  # Just to avoid division by 0 for all-0 weights.
+      log_perps /= total_size
+  return log_perps
+
+
+def sequence_copy_loss(logits,
+                       targets,
+                       weights,
+                       average_across_timesteps=True,
+                       average_across_batch=True,
+                       softmax_loss_function=None,
+                       name=None):
+  """Weighted cross-entropy loss for a sequence of logits, batch-collapsed.
+
+  Args:
+    logits: List of 2D Tensors of shape [batch_size x num_decoder_symbols].
+    targets: List of 1D batch-sized int32 Tensors of the same length as logits.
+    weights: List of 1D batch-sized float-Tensors of the same length as logits.
+    average_across_timesteps: If set, divide the returned cost by the total
+      label weight.
+    average_across_batch: If set, divide the returned cost by the batch size.
+    softmax_loss_function: Function (labels, logits) -> loss-batch
+      to be used instead of the standard softmax (the default if this is None).
+      **Note that to avoid confusion, it is required for the function to accept
+      named arguments.**
+    name: Optional name for this operation, defaults to "sequence_loss".
+
+  Returns:
+    A scalar float Tensor: The average log-perplexity per symbol (weighted).
+
+  Raises:
+    ValueError: If len(logits) is different from len(targets) or len(weights).
+  """
+  for logit, target in zip(logits, targets):
+    combined_copy_logit = tf.tensordot(logit, target)
     for i in xrange(len(logit)):
-      tf.assign(logit[i], tf.cond(label[i] == 1, combined_copy_logit, logit[i]))
-  return nn_ops.softmax_cross_entropy_with_logits(_sentinel=_sentinel,
-                                                  labels=labels,
-                                                  logits=logits,
-                                                  dim=dim,
-                                                  name=name)
+      tf.assign(logit[i], tf.cond(target[i] == 1, combined_copy_logit, logit[i]))
+
+  with ops.name_scope(name, "sequence_loss", logits + targets + weights):
+    cost = math_ops.reduce_sum(
+        sequence_loss_by_example(
+            logits,
+            targets,
+            weights,
+            average_across_timesteps=average_across_timesteps,
+            softmax_loss_function=softmax_loss_function))
+    if average_across_batch:
+      batch_size = array_ops.shape(targets[0])[0]
+      return cost / math_ops.cast(batch_size, cost.dtype)
+    else:
+      return cost
+
+
+def copy_model_with_buckets(encoder_inputs,
+                            decoder_inputs,
+                            targets,
+                            weights,
+                            buckets,
+                            seq2seq,
+                            softmax_loss_function=None,
+                            name=None):
+  """Create a sequence-to-sequence model with support for bucketing.
+
+  The seq2seq argument is a function that defines a sequence-to-sequence model,
+  e.g., seq2seq = lambda x, y: basic_rnn_seq2seq(
+      x, y, rnn_cell.GRUCell(24))
+
+  Args:
+    encoder_inputs: A list of Tensors to feed the encoder; first seq2seq input.
+    decoder_inputs: A list of Tensors to feed the decoder; second seq2seq input.
+    targets: A list of 1D batch-sized int32 Tensors (desired output sequence).
+    weights: List of 1D batch-sized float-Tensors to weight the targets.
+    buckets: A list of pairs of (input size, output size) for each bucket.
+    seq2seq: A sequence-to-sequence model function; it takes 2 input that
+      agree with encoder_inputs and decoder_inputs, and returns a pair
+      consisting of outputs and states (as, e.g., basic_rnn_seq2seq).
+    softmax_loss_function: Function (labels, logits) -> loss-batch
+      to be used instead of the standard softmax (the default if this is None).
+      **Note that to avoid confusion, it is required for the function to accept
+      named arguments.**
+    per_example_loss: Boolean. If set, the returned loss will be a batch-sized
+      tensor of losses for each sequence in the batch. If unset, it will be
+      a scalar with the averaged loss from all examples.
+    name: Optional name for this operation, defaults to "model_with_buckets".
+
+  Returns:
+    A tuple of the form (outputs, losses), where:
+      outputs: The outputs for each bucket. Its j'th element consists of a list
+        of 2D Tensors. The shape of output tensors can be either
+        [batch_size x output_size] or [batch_size x num_decoder_symbols]
+        depending on the seq2seq model used.
+      losses: List of scalar Tensors, representing losses for each bucket, or,
+        if per_example_loss is set, a list of 1D batch-sized float Tensors.
+
+  Raises:
+    ValueError: If length of encoder_inputs, targets, or weights is smaller
+      than the largest (last) bucket.
+  """
+  if len(encoder_inputs) < buckets[-1][0]:
+    raise ValueError("Length of encoder_inputs (%d) must be at least that of la"
+                     "st bucket (%d)." % (len(encoder_inputs), buckets[-1][0]))
+  if len(targets) < buckets[-1][1]:
+    raise ValueError("Length of targets (%d) must be at least that of last "
+                     "bucket (%d)." % (len(targets), buckets[-1][1]))
+  if len(weights) < buckets[-1][1]:
+    raise ValueError("Length of weights (%d) must be at least that of last "
+                     "bucket (%d)." % (len(weights), buckets[-1][1]))
+
+  all_inputs = encoder_inputs + decoder_inputs + targets + weights
+  losses = []
+  outputs = []
+  with ops.name_scope(name, "model_with_buckets", all_inputs):
+    for j, bucket in enumerate(buckets):
+      with variable_scope.variable_scope(
+          variable_scope.get_variable_scope(), reuse=True if j > 0 else None):
+        bucket_outputs, _ = seq2seq(encoder_inputs[:bucket[0]],
+                                    decoder_inputs[:bucket[1]])
+        outputs.append(bucket_outputs)
+        losses.append(sequence_copy_loss(
+            outputs[-1],
+            targets[:bucket[1]],
+            weights[:bucket[1]],
+            softmax_loss_function=softmax_loss_function))
+
+  return outputs, losses
 
