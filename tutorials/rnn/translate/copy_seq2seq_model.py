@@ -24,13 +24,14 @@ import random
 import numpy as np
 from six.moves import xrange  # pylint: disable=redefined-builtin
 import tensorflow as tf
+from tensorflow.python.ops import nn_ops
 
 import data_utils
 from seq2seq_model import Seq2SeqModel
-from copy_seq2seq import copy_seq2seq
+from copy_seq2seq import copy_seq2seq, copy_loss
 
 
-class CopySeq2SeqModel(Seq2SeqModel):
+class CopySeq2SeqModel(object):
   """Sequence-to-sequence model with attention and for multiple buckets.
 
   This class implements a multi-layer recurrent neural network as encoder,
@@ -56,7 +57,7 @@ class CopySeq2SeqModel(Seq2SeqModel):
                learning_rate,
                learning_rate_decay_factor,
                use_lstm=False,
-               num_samples=512,
+               num_samples=0,
                forward_only=False,
                dtype=tf.float32):
     """Create the model.
@@ -95,31 +96,7 @@ class CopySeq2SeqModel(Seq2SeqModel):
 
     # If we use sampled softmax, we need an output projection.
     output_projection = None
-    softmax_loss_function = None
-    # Sampled softmax only makes sense if we sample less than vocabulary size.
-    if num_samples > 0 and num_samples < self.target_vocab_size:
-      w_t = tf.get_variable("proj_w", [self.target_vocab_size, size], dtype=dtype)
-      w = tf.transpose(w_t)
-      b = tf.get_variable("proj_b", [self.target_vocab_size], dtype=dtype)
-      output_projection = (w, b)
-
-      def sampled_loss(labels, logits):
-        labels = tf.reshape(labels, [-1, 1])
-        # We need to compute the sampled_softmax_loss using 32bit floats to
-        # avoid numerical instabilities.
-        local_w_t = tf.cast(w_t, tf.float32)
-        local_b = tf.cast(b, tf.float32)
-        local_inputs = tf.cast(logits, tf.float32)
-        return tf.cast(
-            tf.nn.sampled_softmax_loss(
-                weights=local_w_t,
-                biases=local_b,
-                labels=labels,
-                inputs=local_inputs,
-                num_sampled=num_samples,
-                num_classes=self.target_vocab_size),
-            dtype)
-      softmax_loss_function = sampled_loss
+    softmax_loss_function = nn_ops.softmax_cross_entropy_with_logits 
 
     # Create the internal multi-layer cell for our RNN.
     def single_cell():
@@ -134,53 +111,59 @@ class CopySeq2SeqModel(Seq2SeqModel):
 
     # The seq2seq function: we use embedding for the input and attention.
     def seq2seq_f(encoder_inputs, decoder_inputs, do_decode):
-      return copy_seq2seq(
-          encoder_inputs,
-          decoder_inputs,
-          cell,
-          num_encoder_symbols=source_vocab_size,
-          num_decoder_symbols=target_vocab_size,
-          embedding_size=size,
-          output_projection=output_projection,
-          feed_previous=do_decode,
-          dtype=dtype)
+      return copy_seq2seq(encoder_inputs,
+                          decoder_inputs,
+                          cell,
+                          num_encoder_symbols=source_vocab_size,
+                          num_decoder_symbols=target_vocab_size,
+                          embedding_size=size,
+                          output_projection=output_projection,
+                          feed_previous=do_decode,
+                          dtype=dtype)
 
     # Feeds for inputs.
     self.encoder_inputs = []
     self.decoder_inputs = []
     self.target_weights = []
+    targets = []
     for i in xrange(buckets[-1][0]):  # Last bucket is the biggest one.
       self.encoder_inputs.append(tf.placeholder(tf.int32, shape=[None],
                                                 name="encoder{0}".format(i)))
     for i in xrange(buckets[-1][1] + 1):
       self.decoder_inputs.append(tf.placeholder(tf.int32, shape=[None],
                                                 name="decoder{0}".format(i)))
+      targets.append(tf.placeholder(tf.int32,
+                                    shape=[None, self.target_vocab_size],
+                                    name="target{0}".format(i)))
       self.target_weights.append(tf.placeholder(dtype, shape=[None],
                                                 name="weight{0}".format(i)))
-
-    # Our targets are decoder inputs shifted by one.
-    targets = [self.decoder_inputs[i + 1]
-               for i in xrange(len(self.decoder_inputs) - 1)]
 
     # Training outputs and losses.
     if forward_only:
       self.outputs, self.losses = tf.contrib.legacy_seq2seq.model_with_buckets(
-          self.encoder_inputs, self.decoder_inputs, targets,
-          self.target_weights, buckets, lambda x, y: seq2seq_f(x, y, True),
-          softmax_loss_function=softmax_loss_function)
+        self.encoder_inputs,
+        self.decoder_inputs,
+        targets,
+        self.target_weights,
+        buckets,
+        lambda x, y: seq2seq_f(x, y, True),
+        softmax_loss_function=softmax_loss_function)
       # If we use output projection, we need to project outputs for decoding.
       if output_projection is not None:
         for b in xrange(len(buckets)):
           self.outputs[b] = [
-              tf.matmul(output, output_projection[0]) + output_projection[1]
-              for output in self.outputs[b]
+            tf.matmul(output, output_projection[0]) + output_projection[1]
+            for output in self.outputs[b]
           ]
     else:
-      self.outputs, self.losses = tf.contrib.legacy_seq2seq.model_with_buckets(
-          self.encoder_inputs, self.decoder_inputs, targets,
-          self.target_weights, buckets,
-          lambda x, y: seq2seq_f(x, y, False),
-          softmax_loss_function=softmax_loss_function)
+      self.outputs, self.losses = \
+          tf.contrib.legacy_seq2seq.model_with_buckets(self.encoder_inputs,
+                                                       self.decoder_inputs,
+                                                       targets,
+                                                       self.target_weights,
+                                                       buckets,
+                                                       lambda x, y: seq2seq_f(x, y, False),
+                                                       softmax_loss_function=softmax_loss_function)
 
     # Gradients and SGD update operation for training the model.
     params = tf.trainable_variables()
@@ -193,13 +176,17 @@ class CopySeq2SeqModel(Seq2SeqModel):
         clipped_gradients, norm = tf.clip_by_global_norm(gradients,
                                                          max_gradient_norm)
         self.gradient_norms.append(norm)
-        self.updates.append(opt.apply_gradients(
-            zip(clipped_gradients, params), global_step=self.global_step))
+        self.updates.append(opt.apply_gradients(zip(clipped_gradients, params), global_step=self.global_step))
 
     self.saver = tf.train.Saver(tf.global_variables())
 
-  def step(self, session, encoder_inputs, decoder_inputs, target_weights,
-           bucket_id, forward_only):
+  def step(self,
+           session,
+           encoder_inputs,
+           decoder_inputs,
+           target_weights,
+           bucket_id,
+           forward_only):
     """Run a step of the model feeding the given inputs.
 
     Args:
@@ -275,7 +262,7 @@ class CopySeq2SeqModel(Seq2SeqModel):
       the constructed batch that has the proper format to call step(...) later.
     """
     encoder_size, decoder_size = self.buckets[bucket_id]
-    encoder_inputs, decoder_inputs = [], []
+    encoder_inputs, decoder_inputs, decoder_inputs_1hot = [], [], []
 
     # Get a random batch of encoder and decoder inputs from data,
     # pad them if needed, reverse encoder inputs and add GO to decoder.
@@ -288,16 +275,17 @@ class CopySeq2SeqModel(Seq2SeqModel):
 
       # Decoder inputs get an extra "GO" symbol, and are padded then.
       decoder_pad_size = decoder_size - len(decoder_input) - 1
-      decoder_inputs.append([data_utils.GO_ID] + decoder_input +
-                            [data_utils.PAD_ID] * decoder_pad_size)
-      decoder_inputs_1hot = np.zeros(shape=(len(decoder_inputs), self.target_vocab_size),
-                                     dtype=np.int16)
-      for input_index, decoder_input in enumerate(decoder_inputs):
-          for element in decoder_input:
-              decoder_inputs_1hot[input_index][element] = 1
+      decoder_inputs.append([[data_utils.GO_ID]] + decoder_input +
+                            [[data_utils.PAD_ID]] * decoder_pad_size)
+      decoder_input_1hot = np.zeros(shape=(len(decoder_inputs[-1]), self.target_vocab_size),
+                                    dtype=np.int32)
+      for input_index, decoder_inputs_i in enumerate(decoder_inputs[-1]):
+        for element in decoder_inputs_i:
+          decoder_input_1hot[input_index][element] = 1
+      decoder_inputs_1hot.append(decoder_input_1hot)
 
     # Now we create batch-major vectors from the data selected above.
-    batch_encoder_inputs, batch_decoder_inputs, batch_weights = [], [], []
+    batch_encoder_inputs, batch_decoder_inputs, batch_targets, batch_weights = [], [], [], []
 
     # Batch encoder inputs are just re-indexed encoder_inputs.
     for length_idx in xrange(encoder_size):
@@ -308,6 +296,12 @@ class CopySeq2SeqModel(Seq2SeqModel):
     # Batch decoder inputs are re-indexed decoder_inputs, we create weights.
     for length_idx in xrange(decoder_size):
       batch_decoder_inputs.append(
+          np.array([decoder_inputs[batch_idx][length_idx]
+                    for batch_idx in xrange(self.batch_size)], dtype=np.int32))
+
+    # Batch decoder inputs are re-indexed decoder_inputs, we create weights.
+    for length_idx in xrange(decoder_size):
+      batch_targets.append(
           np.array([decoder_inputs_1hot[batch_idx][length_idx]
                     for batch_idx in xrange(self.batch_size)], dtype=np.int32))
 
@@ -321,4 +315,5 @@ class CopySeq2SeqModel(Seq2SeqModel):
         if length_idx == decoder_size - 1 or target == [data_utils.PAD_ID]:
           batch_weight[batch_idx] = 0.0
       batch_weights.append(batch_weight)
-    return batch_encoder_inputs, batch_decoder_inputs, batch_weights
+    return batch_encoder_inputs, batch_decoder_inputs, batch_targets, batch_weights
+
