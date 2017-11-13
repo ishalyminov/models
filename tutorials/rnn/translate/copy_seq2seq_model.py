@@ -31,7 +31,7 @@ from seq2seq_model import Seq2SeqModel
 from copy_seq2seq import copy_seq2seq, copy_loss
 
 
-class CopySeq2SeqModel(object):
+class CopySeq2SeqModel(Seq2SeqModel):
   """Sequence-to-sequence model with attention and for multiple buckets.
 
   This class implements a multi-layer recurrent neural network as encoder,
@@ -96,7 +96,7 @@ class CopySeq2SeqModel(object):
 
     # If we use sampled softmax, we need an output projection.
     output_projection = None
-    softmax_loss_function = nn_ops.softmax_cross_entropy_with_logits 
+    softmax_loss_function = copy_loss  # nn_ops.softmax_cross_entropy_with_logits 
 
     # Create the internal multi-layer cell for our RNN.
     def single_cell():
@@ -125,16 +125,16 @@ class CopySeq2SeqModel(object):
     self.encoder_inputs = []
     self.decoder_inputs = []
     self.target_weights = []
-    targets = []
+    self.decoder_targets = []
     for i in xrange(buckets[-1][0]):  # Last bucket is the biggest one.
       self.encoder_inputs.append(tf.placeholder(tf.int32, shape=[None],
                                                 name="encoder{0}".format(i)))
     for i in xrange(buckets[-1][1] + 1):
       self.decoder_inputs.append(tf.placeholder(tf.int32, shape=[None],
                                                 name="decoder{0}".format(i)))
-      targets.append(tf.placeholder(tf.int32,
-                                    shape=[None, self.target_vocab_size],
-                                    name="target{0}".format(i)))
+      self.decoder_targets.append(tf.placeholder(tf.int32,
+                                                 shape=[None, self.target_vocab_size],
+                                                 name="target{0}".format(i)))
       self.target_weights.append(tf.placeholder(dtype, shape=[None],
                                                 name="weight{0}".format(i)))
 
@@ -143,7 +143,7 @@ class CopySeq2SeqModel(object):
       self.outputs, self.losses = tf.contrib.legacy_seq2seq.model_with_buckets(
         self.encoder_inputs,
         self.decoder_inputs,
-        targets,
+        self.decoder_targets,
         self.target_weights,
         buckets,
         lambda x, y: seq2seq_f(x, y, True),
@@ -159,7 +159,7 @@ class CopySeq2SeqModel(object):
       self.outputs, self.losses = \
           tf.contrib.legacy_seq2seq.model_with_buckets(self.encoder_inputs,
                                                        self.decoder_inputs,
-                                                       targets,
+                                                       self.decoder_targets,
                                                        self.target_weights,
                                                        buckets,
                                                        lambda x, y: seq2seq_f(x, y, False),
@@ -185,6 +185,7 @@ class CopySeq2SeqModel(object):
            session,
            encoder_inputs,
            decoder_inputs,
+           decoder_targets,
            target_weights,
            bucket_id,
            forward_only):
@@ -224,11 +225,13 @@ class CopySeq2SeqModel(object):
       input_feed[self.encoder_inputs[l].name] = encoder_inputs[l]
     for l in xrange(decoder_size):
       input_feed[self.decoder_inputs[l].name] = decoder_inputs[l]
+      input_feed[self.decoder_targets[l].name] = decoder_targets[l]
       input_feed[self.target_weights[l].name] = target_weights[l]
 
     # Since our targets are decoder inputs shifted by one, we need one more.
     last_target = self.decoder_inputs[decoder_size].name
     input_feed[last_target] = np.zeros([self.batch_size], dtype=np.int32)
+    input_feed[self.decoder_targets[decoder_size].name] = np.zeros([self.batch_size, self.target_vocab_size], dtype=np.int32)
 
     # Output feed: depends on whether we do a backward step or not.
     if not forward_only:
@@ -263,12 +266,12 @@ class CopySeq2SeqModel(object):
       the constructed batch that has the proper format to call step(...) later.
     """
     encoder_size, decoder_size = self.buckets[bucket_id]
-    encoder_inputs, decoder_inputs, decoder_inputs_1hot = [], [], []
+    encoder_inputs, decoder_inputs, decoder_targets_1hot = [], [], []
 
     # Get a random batch of encoder and decoder inputs from data,
     # pad them if needed, reverse encoder inputs and add GO to decoder.
     for _ in xrange(self.batch_size):
-      encoder_input, decoder_input = random.choice(data[bucket_id])
+      encoder_input, decoder_input, decoder_target = random.choice(data[bucket_id])
 
       # Encoder inputs are padded and then reversed.
       encoder_pad = [data_utils.PAD_ID] * (encoder_size - len(encoder_input))
@@ -278,12 +281,13 @@ class CopySeq2SeqModel(object):
       decoder_pad_size = decoder_size - len(decoder_input) - 1
       decoder_inputs.append([data_utils.GO_ID] + decoder_input +
                             [data_utils.PAD_ID] * decoder_pad_size)
-      decoder_inputs_1hot = \
-          np.zeros(shape=(len(decoder_inputs), self.target_vocab_size),
-                   dtype=np.int16)
-      for input_index, decoder_input in enumerate(decoder_inputs):
-          for element in decoder_input:
-              decoder_inputs_1hot[input_index][element] = 1
+      decoder_target_padded = [[data_utils.GO_ID]] + decoder_target + [[data_utils.PAD_ID]] * decoder_pad_size
+      decoder_target_1hot = np.zeros(shape=(len(decoder_target_padded), self.target_vocab_size),
+                                    dtype=np.int32)
+      for target_index, decoder_target_i in enumerate(decoder_target_padded):
+          for element in decoder_target_i:
+              decoder_target_1hot[target_index][element] = 1
+      decoder_targets_1hot.append(decoder_target_1hot)
 
     # Now we create batch-major vectors from the data selected above.
     batch_encoder_inputs, batch_decoder_inputs, batch_targets, batch_weights = [], [], [], []
@@ -291,20 +295,19 @@ class CopySeq2SeqModel(object):
     # Batch encoder inputs are just re-indexed encoder_inputs.
     for length_idx in xrange(encoder_size):
       batch_encoder_inputs.append(
-          np.array([encoder_inputs[batch_idx][length_idx]
-                    for batch_idx in xrange(self.batch_size)], dtype=np.int32))
+          np.array([encoder_inputs[batch_idx][length_idx] for batch_idx in xrange(self.batch_size)],
+                   dtype=np.int32))
 
     # Batch decoder inputs are re-indexed decoder_inputs, we create weights.
     for length_idx in xrange(decoder_size):
       batch_decoder_inputs.append(
-          np.array([decoder_inputs[batch_idx][length_idx]
-                    for batch_idx in xrange(self.batch_size)], dtype=np.int32))
+          np.array([decoder_inputs[batch_idx][length_idx] for batch_idx in xrange(self.batch_size)],
+                   dtype=np.int32))
 
     # Batch decoder inputs are re-indexed decoder_inputs, we create weights.
     for length_idx in xrange(decoder_size):
       batch_targets.append(
-          np.array([decoder_inputs_1hot[batch_idx][length_idx]
-                    for batch_idx in xrange(self.batch_size)],
+          np.array([decoder_targets_1hot[batch_idx][length_idx] for batch_idx in xrange(self.batch_size)],
                    dtype=np.int32))
 
       # Create target_weights to be 0 for targets that are padding.
