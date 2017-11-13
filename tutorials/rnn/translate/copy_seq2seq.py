@@ -1,6 +1,5 @@
 import copy
 
-import tensorflow as tf
 import tensorflow.contrib.legacy_seq2seq
 from tensorflow.contrib.rnn.python.ops import core_rnn_cell
 from tensorflow.python.framework import ops
@@ -12,6 +11,7 @@ from tensorflow.python.ops import (variable_scope,
                                    rnn_cell_impl,
                                    math_ops)
 from tensorflow.python.util import nest
+import tensorflow as tf
 
 Linear = rnn_cell_impl._Linear
 
@@ -405,9 +405,9 @@ def copy_loss(_sentinel=None, labels=None, logits=None, dim=-1, name=None):
   nn_ops._ensure_xent_args("copy_loss", _sentinel, labels, logits)
 
   for logit, label in zip(logits, labels):
-      combined_copy_logit = tf.tensordot(logit, label)
-      for i in xrange(len(logit)):
-          tf.assign(logit[i], tf.cond(label[i] == 1, combined_copy_logit, logit[i]))
+    combined_copy_logit = tf.tensordot(logit, label)
+    for i in xrange(len(logit)):
+      tf.assign(logit[i], tf.cond(label[i] == 1, combined_copy_logit, logit[i]))
   return nn_ops.softmax_cross_entropy_with_logits(_sentinel=_sentinel,
                                                   labels=labels,
                                                   logits=logits,
