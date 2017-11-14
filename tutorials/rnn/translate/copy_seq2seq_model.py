@@ -28,10 +28,10 @@ from tensorflow.python.ops import nn_ops
 
 import data_utils
 from seq2seq_model import Seq2SeqModel
-from copy_seq2seq import copy_seq2seq, copy_loss
+from copy_seq2seq import copy_seq2seq, copy_model_with_buckets 
 
 
-class CopySeq2SeqModel(Seq2SeqModel):
+class CopySeq2SeqModel(object):
   """Sequence-to-sequence model with attention and for multiple buckets.
 
   This class implements a multi-layer recurrent neural network as encoder,
@@ -96,7 +96,6 @@ class CopySeq2SeqModel(Seq2SeqModel):
 
     # If we use sampled softmax, we need an output projection.
     output_projection = None
-    softmax_loss_function = copy_loss  # nn_ops.softmax_cross_entropy_with_logits 
 
     # Create the internal multi-layer cell for our RNN.
     def single_cell():
@@ -140,14 +139,14 @@ class CopySeq2SeqModel(Seq2SeqModel):
 
     # Training outputs and losses.
     if forward_only:
-      self.outputs, self.losses = tf.contrib.legacy_seq2seq.model_with_buckets(
+      self.outputs, self.losses = copy_model_with_buckets(
         self.encoder_inputs,
         self.decoder_inputs,
         self.decoder_targets,
         self.target_weights,
         buckets,
         lambda x, y: seq2seq_f(x, y, True),
-        softmax_loss_function=softmax_loss_function)
+        softmax_loss_function=nn_ops.softmax_cross_entropy_with_logits)
       # If we use output projection, we need to project outputs for decoding.
       if output_projection is not None:
         for b in xrange(len(buckets)):
@@ -156,14 +155,13 @@ class CopySeq2SeqModel(Seq2SeqModel):
             for output in self.outputs[b]
           ]
     else:
-      self.outputs, self.losses = \
-          tf.contrib.legacy_seq2seq.model_with_buckets(self.encoder_inputs,
-                                                       self.decoder_inputs,
-                                                       self.decoder_targets,
-                                                       self.target_weights,
-                                                       buckets,
-                                                       lambda x, y: seq2seq_f(x, y, False),
-                                                       softmax_loss_function=softmax_loss_function)
+      self.outputs, self.losses = copy_model_with_buckets(self.encoder_inputs,
+                                                          self.decoder_inputs,
+                                                          self.decoder_targets,
+                                                          self.target_weights,
+                                                          buckets,
+                                                          lambda x, y: seq2seq_f(x, y, False),
+                                                          softmax_loss_function=nn_ops.softmax_cross_entropy_with_logits)
 
     # Gradients and SGD update operation for training the model.
     params = tf.trainable_variables()

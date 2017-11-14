@@ -327,8 +327,8 @@ def prepare_data(data_dir,
   copy_vocabulary = create_copy_vocabulary(copy_tokens_number)
   # forcing model to copy only
   to_vocabulary_size = len(copy_vocabulary) + len(_START_VOCAB)
-  to_vocab_path = os.path.join(data_dir, "vocab%d.to" % to_vocabulary_size)
-  from_vocab_path = os.path.join(data_dir, "vocab%d.from" % from_vocabulary_size)
+  to_vocab_path = os.path.join(data_dir, "vocab.to")
+  from_vocab_path = os.path.join(data_dir, "vocab.from")
 
   create_vocabulary(to_vocab_path,
                     to_train_path,
@@ -342,52 +342,18 @@ def prepare_data(data_dir,
                     tokenizer,
                     force=force)
 
-  # Create token ids for the training data.
-  # encoder inputs - just ids from the encoder vocabulary
-  from_train_ids_path = from_train_path + (".ids%d" % from_vocabulary_size)
-  data_to_token_ids(from_train_path,
-                    from_train_ids_path,
-                    from_vocab_path,
-                    tokenizer,
-                    force=force)
-  # decoder inputs - decoder sequence ids from encoder vocabulary
-  # (for feeding into the decoder at each time step)
-  to_train_ids_path = to_train_path + (".ids%d" % from_vocabulary_size)
-  data_to_token_ids(to_train_path,
-                    to_train_ids_path,
-                    from_vocab_path,
-                    tokenizer,
-                    force=force)
-
-  # decoder targets - decoder sequences as indices in the encoder sequences
-  to_train_target_ids_path = to_train_path + (".ids%d" % to_vocabulary_size)
-  data_to_copy_ids(from_train_path,
-                   to_train_path,
-                   to_train_target_ids_path,
-                   to_vocab_path,
-                   tokenizer,
-                   force=force)
-
-  # Create token ids for the development data.
-  from_dev_ids_path = from_dev_path + (".ids%d" % from_vocabulary_size)
-  data_to_token_ids(from_dev_path,
-                    from_dev_ids_path,
-                    from_vocab_path,
-                    tokenizer,
-                    force=force)
-  to_dev_ids_path = to_dev_path + (".ids%d" % from_vocabulary_size)
-  data_to_token_ids(to_dev_path,
-                    to_dev_ids_path,
-                    from_vocab_path,
-                    tokenizer,
-                    force=force)
-  to_dev_target_ids_path = to_dev_path + (".ids%d" % to_vocabulary_size)
-  data_to_copy_ids(from_dev_path,
-                   to_dev_path,
-                   to_dev_target_ids_path,
-                   to_vocab_path,
-                   tokenizer,
-                   force=force)
+  from_train_ids_path, to_train_ids_path, to_train_target_ids_path = make_dataset(from_train_path,
+                                                                                  to_train_path,
+                                                                                  from_vocab_path,
+                                                                                  to_vocab_path,
+                                                                                  tokenizer=None,
+                                                                                  force=False)
+  from_dev_ids_path, to_dev_ids_path, to_dev_target_ids_path = make_dataset(from_dev_path,
+                                                                            to_dev_path,
+                                                                            from_vocab_path,
+                                                                            to_vocab_path,
+                                                                            tokenizer=None,
+                                                                            force=False)
   return (from_train_ids_path,
           to_train_ids_path,
           to_train_target_ids_path,
@@ -396,3 +362,32 @@ def prepare_data(data_dir,
           to_dev_target_ids_path,
           from_vocab_path,
           to_vocab_path)
+
+
+def make_dataset(from_path, to_path, from_vocab_path, to_vocab_path, tokenizer=None, force=False):
+  # Create token ids
+  # encoder inputs - just ids from the encoder vocabulary
+  from_ids_path = from_path + ".ids.from"
+  data_to_token_ids(from_path,
+                    from_ids_path,
+                    from_vocab_path,
+                    tokenizer,
+                    force=force)
+  # decoder inputs - decoder sequence ids from encoder vocabulary
+  # (for feeding into the decoder at each time step)
+  to_ids_path = to_path + ".ids.from"
+  data_to_token_ids(to_path,
+                    to_ids_path,
+                    from_vocab_path,
+                    tokenizer,
+                    force=force)
+  # decoder targets - decoder sequences as indices in the encoder sequences
+  to_target_ids_path = to_path + ".ids.to"
+  data_to_copy_ids(from_path,
+                   to_path,
+                   to_target_ids_path,
+                   to_vocab_path,
+                   tokenizer,
+                   force=force)
+  return from_ids_path, to_ids_path, to_target_ids_path 
+

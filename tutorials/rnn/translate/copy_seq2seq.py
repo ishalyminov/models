@@ -10,6 +10,7 @@ from tensorflow.python.ops import (variable_scope,
                                    nn_ops,
                                    rnn_cell_impl,
                                    math_ops)
+from tensorflow.contrib.legacy_seq2seq.python.ops.seq2seq import _extract_argmax_and_embed
 from tensorflow.python.util import nest
 import tensorflow as tf
 
@@ -72,15 +73,13 @@ def copy_seq2seq(encoder_inputs,
       state: The state of each decoder cell at the final time-step.
         It is a 2D Tensor of shape [batch_size x cell.state_size].
   """
-  with variable_scope.variable_scope(scope or "copy_seq2seq",
-                                     dtype=dtype) as scope:
+  with variable_scope.variable_scope(scope or "copy_seq2seq", dtype=dtype) as scope:
     dtype = scope.dtype
     # Encoder.
     encoder_cell = copy.deepcopy(cell)
-    encoder_cell = \
-        core_rnn_cell.EmbeddingWrapper(encoder_cell,
-                                       embedding_classes=num_encoder_symbols,
-                                       embedding_size=embedding_size)
+    encoder_cell = core_rnn_cell.EmbeddingWrapper(encoder_cell,
+                                                  embedding_classes=num_encoder_symbols,
+                                                  embedding_size=embedding_size)
     encoder_outputs, encoder_state = rnn.static_rnn(encoder_cell,
                                                     encoder_inputs,
                                                     dtype=dtype)
@@ -394,10 +393,6 @@ def sequence_loss_by_example(logits,
     log_perp_list = []
     for logit, target, weight in zip(logits, targets, weights):
       if softmax_loss_function is None:
-        # TODO(irving,ebrevdo): This reshape is needed because
-        # sequence_loss_by_example is called with scalars sometimes, which
-        # violates our general scalar strictness policy.
-        target = array_ops.reshape(target, [-1])
         crossent = nn_ops.sparse_softmax_cross_entropy_with_logits(
             labels=target, logits=logit)
       else:
@@ -439,10 +434,17 @@ def sequence_copy_loss(logits,
   Raises:
     ValueError: If len(logits) is different from len(targets) or len(weights).
   """
-  for logit, target in zip(logits, targets):
-    combined_copy_logit = tf.tensordot(logit, target)
-    for i in xrange(len(logit)):
-      tf.assign(logit[i], tf.cond(target[i] == 1, combined_copy_logit, logit[i]))
+  for i in xrange(len(logits)):
+    
+    logit, target = logits[i], targets[i]
+    batch_shape, vocab_shape = tf.shape(logit)[0], tf.shape(logit)[1]
+    target_float = tf.cast(target, tf.float32)
+    dot_product = tf.reduce_sum(tf.multiply(target_float, logit), axis=1)
+    target_mask = tf.multiply(target_float, tf.tile(tf.reshape(dot_product, [batch_shape, 1]), multiples=[1, vocab_shape]))
+    target_inverse_mask = tf.cast(tf.logical_not(tf.cast(target, bool)), tf.float32)
+    logit_mask = tf.multiply(logit, target_inverse_mask)
+    combined_copy_logit = tf.add(target_mask, logit_mask)
+    logits[i] = combined_copy_logit
 
   with ops.name_scope(name, "sequence_loss", logits + targets + weights):
     cost = math_ops.reduce_sum(
